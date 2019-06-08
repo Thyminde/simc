@@ -320,6 +320,7 @@ public:
   {
     action_t* frostbolt;
     action_t* flurry;
+    action_t* dreams;
   } icicle;
 
   // Ignite
@@ -431,6 +432,13 @@ public:
     // Miscellaneous Buffs
     buff_t* gbow;
     buff_t* shimmer;
+
+    buff_t* lucid_dreams;
+    buff_t* lucid_dreams_arcane;
+    buff_t* lucid_dreams_fire;
+    buff_t* lucid_dreams_frost;
+
+    buff_t* perfection;
   } buffs;
 
   // Cooldowns
@@ -438,6 +446,7 @@ public:
   {
     cooldown_t* combustion;
     cooldown_t* cone_of_cold;
+    cooldown_t* fire_blast;
     cooldown_t* frost_nova;
     cooldown_t* frozen_orb;
     cooldown_t* presence_of_mind;
@@ -448,6 +457,7 @@ public:
   {
     gain_t* gbow;
     gain_t* evocation;
+    gain_t* lucid_dreams;
   } gains;
 
   // Options
@@ -459,6 +469,12 @@ public:
     int gbow_count = 0;
     bool allow_shimmer_lance = false;
     rotation_type_e rotation = ROTATION_STANDARD;
+    bool lucid_dreams_minor = false;
+    bool lucid_dreams_major = false;
+    double lucid_dreams_rppm = 0.0;
+    bool vision_of_perfection_minor = false;
+    bool vision_of_perfection_major = false;
+    double vision_of_perfection_rppm = 0.0;
   } options;
 
   // Pets
@@ -495,6 +511,9 @@ public:
   {
     shuffled_rng_t* time_anomaly;
   } shuffled_rng;
+
+  real_ppm_t* lucid_dreams;
+  real_ppm_t* vision_of_perfection;
 
   // Sample data
   struct sample_data_t
@@ -1293,6 +1312,88 @@ public:
     track_cd_waste = data().cooldown() > 0_ms || data().charge_cooldown() > 0_ms;
   }
 
+  void trigger_dreams()
+  {
+    sim->print_debug( "DREAMS TRIGGER" );
+    p()->buffs.lucid_dreams->trigger();
+
+    switch ( p()->specialization() )
+    {
+      case MAGE_ARCANE:
+        p()->resource_gain( RESOURCE_MANA, 0.5 * last_resource_cost, p()->gains.lucid_dreams );
+        break;
+      case MAGE_FIRE:
+        p()->cooldowns.fire_blast->adjust( -0.5 * cooldown_t::cooldown_duration( p()->cooldowns.fire_blast ) );
+        break;
+      case MAGE_FROST:
+        p()->trigger_icicle_gain( target, p()->icicle.dreams );
+        break;
+      default:
+        break;
+    }
+  }
+
+  void trigger_perfection()
+  {
+    sim->print_log( "PERFECTION TRIGGER" );
+    p()->buffs.perfection->trigger();
+
+    const double mult = 0.35;
+
+    switch ( p()->specialization() )
+    {
+      case MAGE_ARCANE:
+      {
+        auto dur = p()->buffs.arcane_power->buff_duration;
+        dur *= mult;
+        if ( p()->buffs.arcane_power->check() )
+          p()->buffs.arcane_power->extend_duration( p(), dur );
+        else
+          p()->buffs.arcane_power->trigger( 1, buff_t::DEFAULT_VALUE(), -1.0, dur );
+        break;
+      }
+      case MAGE_FIRE:
+      {
+        auto dur1 = p()->buffs.combustion->buff_duration;
+        dur1 *= mult;
+        auto dur2 = p()->buffs.wildfire->buff_duration;
+        dur2 *= mult;
+        if ( p()->buffs.combustion->check() )
+        {
+          p()->buffs.combustion->extend_duration( p(), dur1 );
+          p()->buffs.wildfire->extend_duration( p(), dur2 );
+        }
+        else
+        {
+          p()->buffs.combustion->trigger( 1, buff_t::DEFAULT_VALUE(), -1.0, dur1 );
+          p()->buffs.wildfire->trigger( 1, buff_t::DEFAULT_VALUE(), -1.0, dur2 );
+        }
+        break;
+      }
+      case MAGE_FROST:
+      {
+        auto dur1 = p()->buffs.icy_veins->buff_duration;
+        dur1 *= mult;
+        auto dur2 = p()->buffs.frigid_grasp->buff_duration;
+        dur2 *= mult;
+        if ( p()->buffs.icy_veins->check() )
+        {
+          p()->buffs.icy_veins->extend_duration( p(), dur1 );
+          p()->buffs.frigid_grasp->extend_duration( p(), dur2 );
+        }
+        else
+        {
+          p()->buffs.icy_veins->trigger( 1, buff_t::DEFAULT_VALUE(), -1.0, dur1 );
+          // For some reason triggered at full duration.
+          p()->buffs.frigid_grasp->trigger( 1, buff_t::DEFAULT_VALUE(), -1.0 );
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
   mage_t* p()
   { return static_cast<mage_t*>( player ); }
 
@@ -1439,6 +1540,19 @@ public:
   {
     spell_t::execute();
     p()->trigger_leyshock( id, execute_state, mage_t::LEYSHOCK_EXECUTE );
+
+    if ( p()->options.vision_of_perfection_major
+      && p()->vision_of_perfection->trigger() )
+    {
+      trigger_perfection();
+    }
+
+    if ( p()->options.lucid_dreams_minor
+      && ( last_resource_cost > 0.0 || p()->specialization() != MAGE_ARCANE )
+      && p()->lucid_dreams->trigger() )
+    {
+      trigger_dreams();
+    }
 
     // Make sure we remove all cost reduction buffs before we trigger new ones.
     // This will prevent for example Arcane Blast consuming its own Clearcasting proc.
@@ -2480,6 +2594,8 @@ struct arcane_power_t : public arcane_mage_spell_t
   {
     parse_options( options_str );
     harmful = false;
+    if ( p->options.vision_of_perfection_minor )
+      cooldown->duration *= 1.0 - 0.13;
   }
 
   void execute() override
@@ -2643,6 +2759,8 @@ struct combustion_t : public fire_mage_spell_t
     dot_duration = 0_ms;
     harmful = false;
     usable_while_casting = true;
+    if ( p->options.vision_of_perfection_minor )
+      cooldown->duration *= 1.0 - 0.13;
   }
 
   void execute() override
@@ -3091,6 +3209,8 @@ struct flurry_t : public frost_mage_spell_t
     frost_mage_spell_t::execute();
 
     p()->trigger_icicle_gain( target, p()->icicle.flurry );
+    if ( p()->buffs.lucid_dreams_frost->check() )
+      p()->trigger_icicle_gain( target, p()->icicle.flurry );
 
     bool brain_freeze = p()->buffs.brain_freeze->up();
     p()->state.brain_freeze_active = brain_freeze;
@@ -3142,6 +3262,8 @@ struct frostbolt_t : public frost_mage_spell_t
     frost_mage_spell_t::execute();
 
     p()->trigger_icicle_gain( target, p()->icicle.frostbolt );
+    if ( p()->buffs.lucid_dreams_frost->check() )
+      p()->trigger_icicle_gain( target, p()->icicle.frostbolt );
 
     double fof_proc_chance = p()->spec.fingers_of_frost->effectN( 1 ).percent();
     fof_proc_chance *= 1.0 + p()->talents.frozen_touch->effectN( 1 ).percent();
@@ -3625,6 +3747,8 @@ struct icy_veins_t : public frost_mage_spell_t
   {
     parse_options( options_str );
     harmful = false;
+    if ( p->options.vision_of_perfection_minor )
+      cooldown->duration *= 1.0 - 0.13;
   }
 
   void init_finished() override
@@ -3691,6 +3815,15 @@ struct fire_blast_t : public fire_mage_spell_t
     internal_cooldown->start();
 
     p()->buffs.blaster_master->trigger();
+  }
+
+  double recharge_multiplier() const override
+  {
+    double m = fire_mage_spell_t::recharge_multiplier();
+
+    m /= 1.0 + p()->buffs.lucid_dreams_fire->check_value();
+
+    return m;
   }
 };
 
@@ -4362,6 +4495,41 @@ struct touch_of_the_magi_t : public arcane_mage_spell_t
   }
 };
 
+struct lucid_dreams_t : public mage_spell_t
+{
+  lucid_dreams_t( const std::string& n, mage_t* p, const std::string& options_str ) :
+    mage_spell_t( n, p )
+  {
+    parse_options( options_str );
+    harmful = false;
+    trigger_gcd = 1.5_s;
+    cooldown->duration = 3.0_min;
+
+    if ( !p->options.lucid_dreams_major )
+      background = true;
+  }
+
+  void execute() override
+  {
+    mage_spell_t::execute();
+
+    switch ( p()->specialization() )
+    {
+      case MAGE_ARCANE:
+        p()->buffs.lucid_dreams_arcane->trigger();
+        break;
+      case MAGE_FIRE:
+        p()->buffs.lucid_dreams_fire->trigger();
+        break;
+      case MAGE_FROST:
+        p()->buffs.lucid_dreams_frost->trigger();
+        break;
+      default:
+        break;
+    }
+  }
+};
+
 // ==========================================================================
 // Mage Custom Actions
 // ==========================================================================
@@ -4761,6 +4929,7 @@ mage_t::mage_t( sim_t* sim, const std::string& name, race_e r ) :
   // Cooldowns
   cooldowns.combustion       = get_cooldown( "combustion"       );
   cooldowns.cone_of_cold     = get_cooldown( "cone_of_cold"     );
+  cooldowns.fire_blast       = get_cooldown( "fire_blast"       );
   cooldowns.frost_nova       = get_cooldown( "frost_nova"       );
   cooldowns.frozen_orb       = get_cooldown( "frozen_orb"       );
   cooldowns.presence_of_mind = get_cooldown( "presence_of_mind" );
@@ -4853,6 +5022,7 @@ action_t* mage_t::create_action( const std::string& name, const std::string& opt
   if ( name == "shimmer"                ) return new                shimmer_t( name, this, options_str );
 
   // Special
+  if ( name == "lucid_dreams" ) return new lucid_dreams_t( name, this, options_str );
   if ( name == "blink_any" )
     return create_action( talents.shimmer->ok() ? "shimmer" : "blink", options_str );
 
@@ -4870,6 +5040,7 @@ void mage_t::create_actions()
   {
     icicle.frostbolt = get_action<icicle_t>( "frostbolt_icicle", this );
     icicle.flurry    = get_action<icicle_t>( "flurry_icicle", this );
+    icicle.dreams    = get_action<icicle_t>( "dreams_icicle", this );
   }
 
   if ( talents.arcane_familiar->ok() )
@@ -4919,6 +5090,12 @@ void mage_t::create_options()
       return false;
     return true;
   } ) );
+  add_option( opt_bool( "lucid_dreams_minor", options.lucid_dreams_minor ) );
+  add_option( opt_bool( "lucid_dreams_major", options.lucid_dreams_major ) );
+  add_option( opt_float( "lucid_dreams_rppm", options.lucid_dreams_rppm ) );
+  add_option( opt_bool( "vision_of_perfection_minor", options.vision_of_perfection_minor ) );
+  add_option( opt_bool( "vision_of_perfection_major", options.vision_of_perfection_major ) );
+  add_option( opt_float( "vision_of_perfection_rppm", options.vision_of_perfection_rppm ) );
   player_t::create_options();
 }
 
@@ -5179,6 +5356,8 @@ void mage_t::init_base_stats()
   player_t::init_base_stats();
 
   base.spell_power_per_intellect = 1.0;
+  if ( options.vision_of_perfection_minor )
+    passive.versatility_rating += 79.0;
 
   // Mana Attunement
   resources.base_regen_per_second[ RESOURCE_MANA ] *= 1.0 + find_spell( 121039 )->effectN( 1 ).percent();
@@ -5318,6 +5497,29 @@ void mage_t::create_buffs()
     ->set_period( 2.0_s )
     ->set_chance( options.gbow_count > 0 );
   buffs.shimmer = make_buff( this, "shimmer", find_spell( 212653 ) );
+
+  buffs.lucid_dreams = make_buff<stat_buff_t>( this, "lucid_dreams" )
+    ->add_stat( STAT_VERSATILITY_RATING, 502.0 )
+    ->set_max_stack( 1 )
+    ->set_duration( 8.0_s );
+  buffs.lucid_dreams_arcane = make_buff( this, "lucid_dreams_arcane" )
+    ->set_default_value( 1.0 )
+    ->set_affects_regen( true )
+    ->set_max_stack( 1 )
+    ->set_duration( 12.0_s );
+  buffs.lucid_dreams_fire = make_buff( this, "lucid_dreams_fire" )
+    ->set_default_value( 1.0 )
+    ->set_max_stack( 1 )
+    ->set_duration( 12.0_s )
+    ->set_stack_change_callback( [ this ] ( buff_t*, int, int ) { cooldowns.fire_blast->adjust_recharge_multiplier(); } );
+  buffs.lucid_dreams_frost = make_buff( this, "lucid_dreams_frost" )
+    ->set_max_stack( 1 )
+    ->set_duration( 12.0_s );
+
+  buffs.perfection = make_buff<stat_buff_t>( this, "perfection" )
+    ->add_stat( STAT_HASTE_RATING, 107.0 )
+    ->set_max_stack( 1 )
+    ->set_duration( 10.0_s );
 }
 
 void mage_t::init_gains()
@@ -5326,6 +5528,7 @@ void mage_t::init_gains()
 
   gains.evocation = get_gain( "Evocation"                  );
   gains.gbow      = get_gain( "Greater Blessing of Wisdom" );
+  gains.lucid_dreams = get_gain( "Lucid Dreams" );
 }
 
 void mage_t::init_procs()
@@ -5416,6 +5619,8 @@ void mage_t::init_rng()
   // TODO: There's no data about this in game. Keep an eye out in case Blizzard
   // changes this behind the scenes.
   shuffled_rng.time_anomaly = get_shuffled_rng( "time_anomaly", 1, 16 );
+  lucid_dreams = get_rppm( "lucid_dreams", options.lucid_dreams_rppm );
+  vision_of_perfection = get_rppm( "vision_of_perfection", options.vision_of_perfection_rppm );
 }
 
 void mage_t::init_assessors()
@@ -5916,6 +6121,8 @@ double mage_t::resource_regen_per_second( resource_e rt ) const
 
   if ( specialization() == MAGE_ARCANE && rt == RESOURCE_MANA )
     reg *= 1.0 + cache.mastery() * spec.savant->effectN( 1 ).mastery_value();
+
+  reg *= 1.0 + buffs.lucid_dreams_arcane->check_value();
 
   return reg;
 }
